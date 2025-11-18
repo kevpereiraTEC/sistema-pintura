@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Monitoramento IoT - Tinta e Ambiente</title>
+    
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; }
+        .container { max-width: 1200px; margin: auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { color: #333; text-align: center; }
+        .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-top: 20px; }
+        .card { background-color: #eef; padding: 15px; border-radius: 6px; text-align: center; }
+        .card h2 { margin-top: 0; color: #007bff; }
+        .value { font-size: 2.5em; font-weight: bold; color: #333; }
+        .chart-container { width: 100%; height: 400px; margin-top: 40px; }
+    </style>
+
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Dashboard - Leituras do ESP32 (Firebase)</h1>
+        
+        <div class="status-grid">
+            <div class="card">
+                <h2>Nível do Tanque</h2>
+                <div class="value" id="nivel-pct">-- %</div>
+            </div>
+            <div class="card">
+                <h2>Temperatura</h2>
+                <div class="value" id="temperatura-c">-- °C</div>
+            </div>
+            <div class="card">
+                <h2>Umidade</h2>
+                <div class="value" id="umidade-pct">-- %</div>
+            </div>
+            <div class="card">
+                <h2>Presença</h2>
+                <div class="value" id="presenca-status">--</div>
+            </div>
+            
+            <div class="card">
+                <h2>Luminosidade</h2>
+                <div class="value" id="luminosidade-val">--</div>
+            </div>
+            </div>
+
+        <div class="chart-container">
+            <h2>Histórico Recente de Nível (%)</h2>
+            <canvas id="nivelChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // === CONFIGURAÇÃO DO FIREBASE ===
+        const firebaseConfig = {
+            apiKey: "AIzaSyA0bvFKoE3oUOsPoLWpo0rCM_0lyKO4KtM",
+            authDomain: "iorservico.firebaseapp.com",
+            databaseURL: "https://iorservico-default-rtdb.firebaseio.com",
+            projectId: "iorservico",
+            storageBucket: "iorservico.firebasestorage.app",
+            messagingSenderId: "30013482160",
+            appId: "1:30013482160:web:3bb477da8c569b7187c775",
+            measurementId: "G-0KGXK6Q74J"
+        };
+        // =========================================
+
+        // Inicializa o Firebase e a referência ao seu nó de dados
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+        const leiturasRef = database.ref('leituras'); 
+        
+        // --- Configuração das variáveis para o gráfico ---
+        const MAX_DATA_POINTS = 15; 
+        const nivelLabels = [];
+        const nivelData = [];
+        let nivelChart;
+
+        // --- Inicializa o Gráfico de Nível quando a página carrega ---
+        window.onload = function() {
+            const ctx = document.getElementById('nivelChart').getContext('2d');
+            nivelChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: nivelLabels,
+                    datasets: [{
+                        label: 'Nível (%)',
+                        data: nivelData,
+                        borderColor: 'rgb(75, 192, 192)',
+                        tension: 0.1,
+                        fill: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            min: 0,
+                            max: 100,
+                            title: { display: true, text: 'Nível (%)' }
+                        }
+                    }
+                }
+            });
+        };
+
+
+        // --- Escutar os NOVOS dados em Tempo Real ---
+        // 'child_added' escuta o PUSH de novos dados (ideal para seu caso)
+        leiturasRef.limitToLast(1).on('child_added', (snapshot) => {
+            
+            const leitura = snapshot.val(); // Contém todos os dados do ESP32
+
+            // 1. Atualizar valores nos Cartões (DOM)
+            document.getElementById('nivel-pct').textContent     = `${leitura.nivel_pct} %`;
+            document.getElementById('temperatura-c').textContent = `${leitura.temperatura_c} °C`;
+            document.getElementById('umidade-pct').textContent   = `${leitura.umidade_pct} %`;
+            
+            // 💡 NOVA ATUALIZAÇÃO PARA LUMINOSIDADE 💡
+            document.getElementById('luminosidade-val').textContent = leitura.luminosidade;
+            // ----------------------------------------
+            
+            const presencaTexto = leitura.presenca == 1 ? "PRESENÇA" : "NÃO DETECTADA"; 
+            document.getElementById('presenca-status').textContent = presencaTexto;
+            
+            // 2. Atualizar o Gráfico
+            const dataObjeto = new Date(leitura.timestamp);
+            const horaFormatada = dataObjeto.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            nivelLabels.push(horaFormatada);
+            nivelData.push(leitura.nivel_pct);
+
+            // Mantém apenas os últimos 15 pontos no gráfico
+            if (nivelLabels.length > MAX_DATA_POINTS) {
+                nivelLabels.shift();
+                nivelData.shift();
+            }
+
+            // Redesenha o gráfico com os novos dados
+            nivelChart.update();
+
+        }, (error) => {
+            console.error("Erro ao ler dados do Firebase: ", error);
+        });
+
+    </script>
+</body>
+</html>
