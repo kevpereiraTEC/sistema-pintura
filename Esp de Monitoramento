@@ -1,0 +1,220 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include <DHT.h>
+#include <HTTPClient.h>
+
+// ---------- SENSORES E PINOS ORIGINAIS ----------
+#define TRIG 32
+#define ECHO 33
+#define DHTPIN 5
+#define DHTTYPE DHT11
+
+#define LDR 34
+#define PIR 27
+
+#define LED_VERDE_NIVEL 25
+#define LED_VERM_NIVEL 26
+
+float altura_tanque_cm = 20.0;
+
+// ---------- LEDS ESPNOW ----------
+#define LED_ESPNOW_OK 12
+#define LED_ESPNOW_FAIL 14
+
+const char* ssid = "artur";
+const char* password = "123456789";
+
+const char* FIREBASE_HOST = "https://iorservico-default-rtdb.firebaseio.com/";
+String firebasePath = "/leituras.json";
+
+// ---------- MAC DO RECEBEDOR ----------
+uint8_t slaveMacAddress[] = { 0x80, 0xB5, 0x4E, 0xC5, 0x8E, 0xA4 };
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// ----- seção ESPNOW -----
+esp_now_peer_info_t peerInfo;
+
+void onSent(const wifi_tx_info_t *mac_addr, esp_now_send_status_t status) {
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    digitalWrite(LED_ESPNOW_OK , HIGH);
+    digitalWrite(LED_ESPNOW_FAIL, LOW);
+  } else {
+    digitalWrite(LED_ESPNOW_OK , LOW);
+    digitalWrite(LED_ESPNOW_FAIL, HIGH);
+  }
+}
+
+// ---------- nível ----------
+float leNivelPercentual() {
+  digitalWrite(TRIG, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+
+  long dur = pulseIn(ECHO, HIGH);
+  float dist = dur * 0.034/2;
+  if (dist > altura_tanque_cm) dist = altura_tanque_cm;
+  if (dist < 0) dist = 0;
+  return 100.0*(altura_tanque_cm - dist)/altura_tanque_cm;
+}
+
+void conectarWiFi() {
+  Serial.print("Conectando WiFi ");
+  WiFi.begin(ssid, password);
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(300);
+    // timeout seguro de 20s
+    if (millis() - t0 > 20000) {
+      Serial.println("\nFalha ao conectar WiFi (timeout). Verifique SSID/senha ou rede.");
+      return;
+    }
+  }
+  Serial.println("\nWiFi conectado");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void enviarParaFirebase(float nivel, float temp, float umid, int luz, int presenca, unsigned long ts) {
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    HTTPClient http;
+    String url = String(FIREBASE_HOST) + firebasePath;
+
+    String json = "{";
+    json += "\"timestamp\":{ \".sv\":\"timestamp\" },";
+    json += "\"nivel_pct\":" + String(nivel,1) + ",";
+    json += "\"temperatura_c\":" + String(temp,1) + ",";
+    json += "\"umidade_pct\":" + String(umid,1) + ",";
+    json += "\"luminosidade\":" + String(luz) + ",";
+    json += "\"presenca\":" + String(presenca) + ",";
+    json += "\"millis\":" + String(ts);
+    json += "}";
+
+    Serial.print("Enviando para Firebase (url): ");
+    Serial.println(url);
+    Serial.print("Payload: ");
+    Serial.println(json);
+
+    http.begin(url);
+    http.addHeader("Content-Type","application/json");
+
+    int code = http.POST(json);
+
+    if (code >= 200 && code < 300) {
+      Serial.print("Firebase OK (HTTP ");
+      Serial.print(code);
+      Serial.println(")");
+      String resp = http.getString();
+      Serial.print("Resposta Firebase: ");
+      Serial.println(resp);
+    } else {
+      Serial.print("Falha Firebase HTTP: ");
+      Serial.println(code);
+      // corpo de resposta (pode ajudar a debugar)
+      String body = http.getString();
+      Serial.print("Resposta body: ");
+      Serial.println(body);
+    }
+
+    http.end();
+  } else {
+    Serial.println("WiFi nao conectado - nao vai enviar para Firebase");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TRIG,OUTPUT);
+  pinMode(ECHO,INPUT);
+
+  pinMode(LED_VERDE_NIVEL,OUTPUT);
+  pinMode(LED_VERM_NIVEL,OUTPUT);
+
+  pinMode(PIR,INPUT);
+
+  pinMode(LED_ESPNOW_OK ,OUTPUT);
+  pinMode(LED_ESPNOW_FAIL,OUTPUT);
+  digitalWrite(LED_ESPNOW_OK ,LOW);
+  digitalWrite(LED_ESPNOW_FAIL,LOW);
+
+  dht.begin();
+
+  // DEFINIR MODO STA ANTES DE CONECTAR
+  WiFi.mode(WIFI_STA);
+  conectarWiFi();   // agora conecta e mantém associação
+
+  // ESPNOW (pode funcionar com STA conectado)
+  memset(&peerInfo, 0, sizeof(peerInfo));
+  if (esp_now_init()!=ESP_OK){
+    Serial.println("Erro init ESP-NOW");
+    // não trava em while(1) para permitir debug
+  } else {
+    esp_now_register_send_cb(onSent);
+    memcpy(peerInfo.peer_addr, slaveMacAddress, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+    if(esp_now_add_peer(&peerInfo)!=ESP_OK){
+      Serial.println("Erro add peer (pode ser MAC errado ou peer offline)");
+    } else {
+      Serial.println("Peer ESPNOW adicionado");
+    }
+  }
+}
+
+void loop() {
+
+  float nivel = leNivelPercentual();
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+  int luz  = analogRead(LDR);
+  int pres = digitalRead(PIR) ? 1:0;
+  unsigned long ts = millis();
+
+  // leds status tanque
+  if (nivel < 20.0){
+    digitalWrite(LED_VERM_NIVEL,HIGH);
+    digitalWrite(LED_VERDE_NIVEL,LOW);
+  } else {
+    digitalWrite(LED_VERDE_NIVEL,HIGH);
+    digitalWrite(LED_VERM_NIVEL,LOW);
+  }
+
+  // MONITOR – igual pedido
+  Serial.print("Nivel do tanque: "); Serial.print(nivel); Serial.println("%");
+  if(nivel<20.0) Serial.println("ALERTA! Nivel de tinta baixo.");
+  Serial.print("Temperatura: "); Serial.print(t); Serial.print(" C | Umidade: "); Serial.print(h); Serial.println("%");
+  Serial.print("Luminosidade: "); Serial.println(luz);
+  Serial.print("Presenca: "); Serial.println(pres ? "Presenca detectada":"Sem presenca");
+  Serial.println((nivel<20.0) ? "Estado: ALERTA - verificar tanque de tinta!" : "Estado: Operacao normal.");
+  Serial.println("-------------------------------");
+
+  // monta JSON
+  String json = "{";
+  json += "\"nivel\":" + String(nivel,1) + ",";
+  json += "\"temp\":" + String(t,1) + ",";
+  json += "\"umidade\":" + String(h,1) + ",";
+  json += "\"luz\":" + String(luz) + ",";
+  json += "\"presenca\":" + String(pres) + ",";
+  json += "\"ts\":" + String(ts);
+  json += "}";
+
+  // envia ESPNOW
+  esp_err_t res = esp_now_send(slaveMacAddress,(uint8_t*)json.c_str(),json.length());
+  if (res == ESP_OK){
+    Serial.print("Pacote ESPNOW enviado com sucesso: ");
+    Serial.println(json);
+  } else {
+    Serial.print("Falha no envio ESPNOW (err=");
+    Serial.print(res);
+    Serial.println(")");
+  }
+
+  // envia para Firebase (somente se conectado)
+  enviarParaFirebase(nivel, t, h, luz, pres, ts);
+
+  delay(2000);
+}
